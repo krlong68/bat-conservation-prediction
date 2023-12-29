@@ -1,0 +1,1519 @@
+---
+title: "Predicting Conservation Status of Bat Species with Ensemble Models: Feature Analysis and Model Evaluation"
+date: "December 2023"
+author: "Kaelyn Long"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    number_sections: true
+urlcolor: blue
+linkcolor: blue
+---
+
+```{r setup, echo = FALSE, message = FALSE}
+# Set chunk options
+knitr::opts_chunk$set(echo = FALSE,
+                      comment = "",
+                      fig.align = "center")
+
+# Load packages and install if needed
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(knitr,
+               corrplot,
+               FactoMineR,
+               factoextra,
+               ggplot2,
+               gridExtra,
+               klaR,
+               rpart,
+               randomForest,
+               kernlab,
+               caret,
+               performanceEstimation,
+               tidyverse)
+```
+
+---
+
+# Introduction
+
+Caves and karsts are fascinating ecosystems, inhabited by unique mixtures of taxa and protected from many outside influences. Bats are perhaps their most widely known inhabitants, serving as keystone species and facilitating nutrient flow into these isolated environments. As a result, bat population status is often a useful indicator of cave conservation necessity. As cave conservation funds are often lacking, however, decisions must be made in order to effectively prioritize certain caves. The [DarkCideS 1.0 database](https://darkcides.wordpress.com/) was created as a tool to assist in making these decisions, with information surrounding over 6000 occurrences of cave-dwelling bats across over 2000 cave sites, 46 countries, and 12 biomes [(Tanalgo et al., 2022b)](#references).
+
+This project is an exploration of the DarkCideS 1.0 database in an attempt to predict conservation status for individual bat species based on ecological metadata. The DarkCideS database contains four sets of data concerning cave-dwelling bat species, bat-inhabited caves, and bat parasites and hyperparasites. I will be using datasets 1 and 4 in this project. [Dataset 1](https://figshare.com/articles/dataset/Metadata_for_DarkCideS_1_0_a_global_database_for_bats_in_karsts_and_caves/16413405?file=34091936) contains species-specific metadata such as habitat preference, feeding groups, distribution range, generation length, ecological status, and exposure to various potential threats. [Dataset 4](https://figshare.com/articles/dataset/Metadata_for_DarkCideS_1_0_a_global_database_for_bats_in_karsts_and_caves/16413405?file=34091945) contains species of parasitic bat flies, their _Laboulbeniales_ fungal hyperparasites, and their associations with different bat species.
+
+For this project, I will be focusing on the __Conservation.status__ variable as a target. This variable classifies each bat species present in dataset 1 into one of five levels of conservation status, or as data deficient. The data deficient records will be separated out, models will be trained and validated on the remainder of the data, and a heterogeneous ensemble model will be used to predict possible values for the data deficient record.
+
+The incorporation of dataset 4 will come through the creation of novel parasitemia features for dataset 1. Three features that capture different levels of parasitemia will be created and assessed for a relationship with the target feature, __Conservation.status__. The specifics of the features are as follows:
+
+  * Parasitemia indicator: Does the bat species have one or more recorded parasitemia events?
+  * Number of unique batfly parasites: How many species of batfly are known to parasitize the bat species?
+  * Number of unique _Laboulbeniales_ parasites: How many species of _Laboulbeniales_ hyperparasites are known to be associated with the bat species?
+  
+After this feature creation, both the original and new features will be evaluated for association with the target feature, __Conservation.status__. Various metrics, including Chi-square, ANOVA, and Pearson correlation analysis, will be used to evaluate interactions between variables with different data types. Additionally, Factor Analysis of Mixed Data (FAMD) will be used to visualize feature contributions and potential clustering.
+
+Pre-processing steps for the data will include handling of outliers and missing data, scaling and normalization, and class balancing. These steps will be carried out for training and validation sets separately in the interest of simulating model performance with novel data.
+
+The base models to be trained on the data include the following:
+
+  * Naive Bayes: the Naive Bayes model is suitable for multiclass classification as well as a high number of categorical variables
+  * Decision Tree: the Decision tree model is suitable for diverse features and a mix of categorical and continuous variables
+  * Support Vector Machine (SVM): the SVM model is suitable for a high number of features and is resistant to overfitting
+
+These models will undergo tuning of hyperparameters as appropriate. They will then be incorporated into two ensemble models: the Random Forest classifier, and a majority vote heterogeneous ensemble model.
+
+The performance of each model, both separately and in ensembles, will then be assessed via k-fold cross-validation. The main evaluation metric used will be the F1 score, which combines the precision and recall metrics for each class. As the target feature, __Conservation.status__, has multiple levels, the F1 scores for each class will be summed for comparison against other models. Additionally, the accuracy of each model will be considered as a secondary metric.
+
+Finally, our heterogeneous ensemble model will be used to generate predictions for the __Conservation.status__ value of each record originally classed as "Data Deficient."
+
+In the interest of transparency, I also want to bring attention to previous analysis efforts. The DarkCideS 1.0 database has been utilized to perform an assessment of conservation priorities of specific cave sites using a binomial generalized linear model to assess variables as predictors of binary threat status [(Tanalgo et al., 2022a)](#references).
+
+---
+
+\newpage
+
+# Data Handling
+
+## Data Acquisition
+
+The two datasets used in this analysis can be retrieved from [Figshare](https://figshare.com/articles/dataset/Metadata_for_DarkCideS_1_0_a_global_database_for_bats_in_karsts_and_caves/16413405?file=34091936) through the [DarkCideS 1.0 official website](https://darkcides.wordpress.com/). Both are retrieved as `.csv` files. Dataset 1 is focused on bat species and has 679 observations of 1 ID feature, 5 taxonomic features, 40 ecological metadata features including the target, and 6 additional reference features. Dataset 4 is focused on parasitemia by batflies and _Laboulbeniales_ hyperparasites and has 126 observations of 1 ID feature, 5 parasitemia metadata features, 2 reference features, and 1 blank column.
+
+```{r load_data}
+# Load bat species dataset
+o_tax_df <- read.csv("https://figshare.com/ndownloader/files/34091936", encoding = "latin1")
+
+# Load parasitemia dataset
+o_fly_df <- read.csv("https://figshare.com/ndownloader/files/34091945", encoding = "latin1")
+```
+
+As a first look at our prediction goal, we will examine the distribution of our target feature, __Conservation.status__.
+
+```{r cs_dist}
+# View Conservation.status distribution
+target_mat <- as.data.frame(table(o_tax_df$Conservation.status))
+colnames(target_mat) <- c("Conservation.status", "Frequency")
+
+target_plot <- ggplot(data = target_mat, aes(x = Conservation.status, y = Frequency)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme(axis.text.x = element_text(hjust = 1, angle = 45, vjust = 1))
+target_plot
+```
+
+We can first see that __Conservation.status__ is extremely imbalanced, which could pose an issue for our models. In order to rectify this problem, we will later employ the Synthetic Minority Oversampling Technique (SMOTE) to strategically oversample minority classes. This balancing will be done for each training or validation dataset as it is created and the performance of each model with both balanced and unbalanced data will be assessed.
+
+We can now proceed to our data acquisition and feature engineering. The six reference features in the bat dataset simply contain source information for other features. We will begin by removing these. We will also remove the record ID column. Additionally, taxonomic information on the suborder and family level will not be used to predict conservation status and will be removed. For the parasitic fly dataset, we only need the features __Bat.species__, __Batfly.parasite__, and __Laboulbeniales.hyperparasite__ to create our parasitemia features for the bat dataset.
+
+```{r pruning}
+# Remove unneeded features (ids, sources, extra taxonomic features)
+tax_df <- o_tax_df %>%
+  select(-ends_with(".source")) %>%
+  select(-c(Dataset_sequence_ID, Suborders, Families))
+fly_df <- o_fly_df %>%
+  select(Bat.species, Batfly.parasite, Laboulbeniales.hyperparasite)
+```
+
+Before creating the parasitemia features, however, we need to clean up some of the values in the fly dataset. Multiple values have accessory information contained in brackets that needs to be removed.
+
+```{r cleaning}
+# Remove bracketed accessory information from flies
+fly_df$Bat.species <- gsub(r"{\s*\[[^\]+\]}","", as.character(fly_df$Bat.species))
+fly_df$Batfly.parasite <- gsub(r"{\s*\[[^\]+\]}","", as.character(fly_df$Batfly.parasite))
+fly_df$Laboulbeniales.hyperparasite <- gsub(r"{\s*\[[^\]+\]}","", as.character(fly_df$Laboulbeniales.hyperparasite))
+```
+
+Once the fly dataset is clean, we use it to derive additional features for the bat dataset. The features are defined as follows:
+
+  * Parasitemia indicator: This feature has a value of 1 if the bat species is recorded to have any parasitemia, and a value of 0 if not
+  * Number of unique fly parasites: This feature is an integer count of the number of unique fly species reported to parasitize the bat species
+  * Number of unique _Laboulbeniales_ hyperparasites: This feature is an integer count of the number of unique _Laboulbeniales_ species reported to be involved in a parasitic relationship with the bat species
+
+Once these features are created, we remove the taxonomic genus and species information from the bat dataset, as it does not have any direct bearing on conservation status.
+
+```{r parasite_features}
+# Create empty parasitemia features
+# Parasitemia indicator
+tax_df$Ind.parasitemia <- NA
+# Number of unique parasitic batflies reported to parasitize this bat species
+tax_df$Num.flies <- NA
+# Number of unique Laboulbeniales sp. hyperparasites reported to hyperparasitize this bat species
+tax_df$Num.Laboulbeniales <- NA
+
+for (i in 1:nrow(tax_df)) {
+  # Gather associated parasitemia reports
+  detected <- grep(tax_df$Species.name[i], fly_df$Bat.species)
+  
+  # Save parasitemia indicator and unique batfly/Laboulbeniales sp. hyperparasite counts
+  tax_df$Num.flies[i] <- length(unique(fly_df$Batfly.parasite[detected]))
+  tax_df$Num.Laboulbeniales[i] <- length(unique(fly_df$Laboulbeniales.hyperparasite[detected]))
+  tax_df$Ind.parasitemia[i] <- ifelse(length(detected) > 0, 1, 0)
+}
+
+# Remove now-unneeded taxonomic features
+tax_df <- tax_df %>%
+  select(-c(Species.name, Genus, Species))
+
+# Define feature groups
+target_ind <- 8
+cont_inds <- c(15, 16, 17, 18, 42, 43)
+cat_inds <- c(1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41)
+target_name <- names(tax_df)[target_ind]
+cont_names <- names(tax_df)[cont_inds]
+cat_names <- names(tax_df)[cat_inds]
+
+target_col <- tax_df[, target_ind, drop = FALSE]
+cont_df <- tax_df[, cont_inds]
+cat_df <- tax_df[, cat_inds]
+```
+
+\newpage
+
+## Data Cleaning & Shaping
+
+Now we move on to cleaning and shaping the dataset. We perform outlier and missing value detection. For outliers, we create a dataset that retains outliers as well as one that has outliers removed. Model performance for each of these will be evaluated further down the line. We also visualize each of our continuous features to assess outlier presence and distribution.
+
+```{r outliers, fig.dim = c(6, 7)}
+# Plot histograms of continuous features
+par(mfrow = c(3, 2))
+hist(tax_df$Current.range, main = NULL, xlab = "Current.range")
+hist(tax_df$Natural.range, main = NULL, xlab = "Natural.range")
+hist(tax_df$Body.mass, main = NULL, xlab = "Body.mass")
+hist(tax_df$Generation.length, main = NULL, xlab = "Generation.length")
+hist(tax_df$Num.flies, main = NULL, xlab = "Num.flies")
+hist(tax_df$Num.Laboulbeniales, main = NULL, xlab = "Num.Laboulbeniales")
+
+# Identify records with outliers
+out_rows <- unique(unlist(lapply(tax_df[, cont_inds], function(x) which(abs(scale(x)) > 2.5))))
+
+# Create dataset with outliers removed
+in_tax_df <- tax_df[-out_rows,]
+```
+
+We found that though our dataset does not contain any true missing values, the target classification feature __Conservation.status__ has a small number of records classified as "Data Deficient." Because these are not true missing values we will not impute them with the median value. Instead, we will move these records to their own dataset to serve as our final prediction goal after training the ensemble model.
+
+Because our dataset has no true missing values, we randomly remove some values in order to demonstrate imputation methods. Imputation methods for our data involve the replacement of missing continuous values with that feature's median value and the replacement of missing categorical values with that feature's statistical mode. The resulting datasets with both missing and imputed data are conserved separately from the original dataset for comparison later on.
+
+```{r imputation_functions}
+# Statistical mode function
+smode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+# Function to impute missing values with median
+miss2median <- function(raw_vector, ref_vector = raw_vector) {
+  ## raw_vector = vector of values to impute if missing
+  ## ref_vector (optional) = vector to use as median source
+  
+  wvec <- raw_vector
+  fvec <- ref_vector
+  
+  # Get median
+  vmed <- median(fvec)
+  
+  # Impute missing values and return vector
+  wvec[is.na(wvec)] <- vmed 
+  return(wvec)
+}
+
+# Function to impute missing values with mode
+miss2mode <- function(raw_vector, ref_vector = raw_vector) {
+  ## raw_vector = vector of values to impute if missing
+  ## ref_vector (optional) = vector to use as mode source
+  
+  wvec <- raw_vector
+  fvec <- ref_vector
+  
+  # Get median
+  vmod <- smode(fvec)
+  
+  # Impute missing values and return vector
+  wvec[is.na(wvec)] <- vmod 
+  return(wvec)
+}
+```
+
+```{r fake_missing}
+# Check for missing values
+na_tax <- tax_df[!complete.cases(tax_df),]
+
+# Separate "Data Deficient" records from the rest
+pred_df <- filter(tax_df, Conservation.status == "Data Deficient")
+tax_df <- filter(tax_df, Conservation.status != "Data Deficient")
+in_tax_df <- filter(in_tax_df, Conservation.status != "Data Deficient")
+
+# Create artificial missing values
+miss_df <- tax_df
+tlen <- nrow(miss_df)
+twid <- ncol(miss_df)
+set.seed(6886)
+ir <- sample.int(tlen, size = floor(0.1 * tlen), replace = T)
+ic <- sample.int(twid, size = length(ir), replace = T)
+
+for (i in 1:length(ir)) {
+  r <- ir[i]
+  c <- ic[i]
+  miss_df[r, c] <- NA
+}
+
+# Create dataset with missing values removed
+remiss_df <- miss_df[complete.cases(miss_df),]
+
+# Create dataset with missing values imputed
+miss_df[, cont_inds] <- lapply(miss_df[, cont_inds], miss2median)
+miss_df[, -cont_inds] <- lapply(miss_df[, -cont_inds], miss2mode)
+```
+
+We also create a function to log-normalize the datasets' continuous features. Scaling and normalization of these features will occur as part of the training of each model, as we will be mainly using k-fold cross-validation to assess our models and we want to preserve the independence of the training and validation partitions.
+
+```{r log_norm}
+# Function to log-normalize columns based on Shapiro-Wilk test
+logNorm <- function(df) {
+  ## df = dataframe of continuous features
+  
+  # Conduct Shapiro-Wilk test
+  osw <- lapply(df, function(x) {
+      tryCatch(shapiro.test(x)$p.value, error = function(e) 0)
+    })
+  
+  # Get non-normal features
+  o_not_normal <- which(osw < 0.05)
+  
+  # Log transform non-normal columns
+  tcols <- as.data.frame(lapply(df[, o_not_normal], function(x) log(x + 3 + 10^-10)))
+  
+  return(tcols)  
+}
+```
+
+## Data Exploration
+
+We will then explore the relationships between features in our dataset. We begin with a visualization of the dataset through the lens of dimensionality reduction. As we have a mix of categorical and numeric features, we will employ Factor Analysis of Mixed Data (FAMD) rather than the typical Principal Component Analysis (PCA), which only takes continuous variables.
+
+```{r prelim_FAMD}
+# Conduct FAMD
+all_famd <- FAMD(tax_df, graph = FALSE)
+
+# Extract percentages of variance for first two dimensions
+d1p <- all_famd$eig[1, 2]
+d2p <- all_famd$eig[2, 2]
+
+# Extract maximum-contributing variables for first two dimensions
+d1v <- names(which.max(all_famd[["var"]][["contrib"]][,1]))
+d2v <- names(which.max(all_famd[["var"]][["contrib"]][,2]))
+```
+
+First, we see our data plotted as a function of the first two dimensions. There is substantial overlap between the levels in the target variable, __Conservation.status__, but we can see that dimensions 1 and 2 explain `r round(d1p, 1)`% and `r round(d2p, 1)`% of the dataset variance, respectively.
+
+\
+
+``` {r FAMD_plot}
+# Plot individual points 
+fviz_mfa_ind(all_famd,
+             geom = "point",
+             habillage = "Conservation.status",
+             addEllipses = TRUE,
+             ellipse.level = 0.5,
+             repel = TRUE)
+```
+
+\newpage
+
+We now take a look at the contribution of each variable to each of the first two dimensions. We can see that the variable with the most contribution to the first dimension is __`r d1v`__, while the variable with the most contribution to the second dimenstion is __`r d2v`__.
+
+\
+
+``` {r FAMD_loadings}
+# Plot variable contributions
+fviz_famd_var(all_famd, repel = TRUE, col.var = "darkred")
+```
+
+\newpage
+
+Now we will use Chi-square, ANOVA, and Pearson correlation analysis to quantitatively assess interactions between features. Our target variable, __Conservation.status__, is categorical, so we will use Chi-square analysis to detect associated categorical variables and ANOVA to detect associated continuous variables. We will also use Chi-square analysis and Pearson correlation to identify associations between non-target variables.
+
+```{r associations}
+# Chi-square analysis of categorical features, including Conservation.status
+cat_df <- tax_df[, c(target_ind, cat_inds)]
+
+csmat <- matrix(nrow = ncol(cat_df), ncol = ncol(cat_df), dimnames = list(colnames(cat_df), colnames(cat_df)))
+
+for (i in 1:ncol(cat_df)) {
+  for (j in 1:ncol(cat_df)) {
+    csmat[i, j] <- 1 - suppressWarnings(chisq.test(cat_df[, i], cat_df[, j]))$p.value
+  }
+}
+
+# Anova comparison to Conservation.status
+ta <- mapply(function(x, y) summary(aov(x ~ y, data = tax_df)), tax_df[, cont_inds], MoreArgs = list(tax_df$Conservation.status))
+ta <- lapply(ta, function(x) x$`Pr(>F)`[1])
+
+tac <- lapply(ta, function(x) 1 - x)
+dcor <- rep(0, 6)
+anovamat <- cbind(unlist(tac), dcor, dcor, dcor, dcor, dcor)
+anovamat[1, ] <- anovamat[, 1]
+colnames(anovamat)[1] <- "Conservation.status"
+
+# Correlations between continuous features
+ncormat <- cor(tax_df[, cont_inds])
+```
+
+We first see the Chi-square-identified relationships between each of our categorical variables, including our target feature, __Conservation.status__. The color of each square is indicative of the value $1-p$, meaning that dark squares indicate a greater degree of association between the two variables.
+
+```{r cat_plot}
+# Relationship matrix of categorical features
+csgram <- corrplot(csmat,
+                   tl.cex = 0.5,
+                   tl.col = "black",
+                   is.corr = FALSE,
+                   order = "hclust")
+```
+
+We then examine the ANOVA-identified relationships between our continuous variables and our target feature, __Conservation.status__. Here we again see the color reflecting the value of $1-p$.
+
+```{r mix_plot}
+# Relationship matrix between Conservation.status and continuous features
+tanovamat <- t(anovamat[, 1, drop = FALSE])
+anovagram <- corrplot(tanovamat,
+                      tl.cex = 0.75,
+                      tl.col = "black",
+                      is.corr = FALSE,
+                      col.lim = c(0, 1),
+                      tl.srt = 45,
+                      cl.length = 3)
+```
+
+\newpage
+
+Finally, we use the Pearson correlation to view correlations between continuous variables. In this plot, the color corresponds to the value of the Pearson correlation coefficient, such that darker blue or red colors indicate a greater degree of positive or negative correlation, respectively.
+
+```{r cont_plot}
+# Correlation matrix of continuous features
+ncorgram <- corrplot(ncormat,
+                     tl.cex = 0.75,
+                     tl.col = "black")
+```
+
+With these plots, we can see that there is a great deal of association between predictor features. Looking first at our categorical features, whose relationship is defined by the Chi-square _p_-value, two major trends of equivalent associations are seen. __Conservation.status__ shows a high degree of association with __Extinction.risk__ and __Population.status__, and __Geopolotical.endemism__ shows a high degree of association with __Island.endemism__. For our continuous variables, we similarly see collinearity between __Current.range__ and __Natural.range__. We will not remove these associated variables as their presence does not impact model performance, but we will keep these relationships in mind for interpretation down the line.
+
+We will then remove all remaining features that do not show a significant correlation with our target feature, __Conservation.status__.
+
+```{r feature_selection}
+# Remove similar variables: Extinction.risk, Population.status
+simvars <- c("Extinction.risk", "Population.status")
+prune_df <- tax_df %>%
+  select(-all_of(simvars))
+
+p_in_df <- in_tax_df %>%
+  select(-all_of(simvars))
+p_remiss_df <- remiss_df %>%
+  select(-all_of(simvars))
+p_fmiss_df <- miss_df %>%
+  select(-all_of(simvars))
+p_pred_df <- pred_df %>%
+  select(-all_of(simvars))
+
+# Remove categorical variables with insignificant chi-square
+ics <- colnames(csmat)[which((1 - as.data.frame(csmat)$Conservation.status) > 0.05)]
+
+prune_df <- prune_df %>%
+  select(-all_of(ics))
+
+p_in_df <- p_in_df %>%
+  select(-all_of(ics))
+p_remiss_df <- p_remiss_df %>%
+  select(-all_of(ics))
+p_fmiss_df <- p_fmiss_df %>%
+  select(-all_of(ics))
+p_pred_df <- p_pred_df %>%
+  select(-all_of(ics))
+
+# Remove continuous variables with insignificant anova
+iaov <- rownames(anovamat)[which((1 - as.data.frame(anovamat)$Conservation.status) > 0.05)]
+
+prune_df <- prune_df %>%
+  select(-all_of(iaov))
+
+p_in_df <- p_in_df %>%
+  select(-all_of(iaov))
+p_remiss_df <- p_remiss_df %>%
+  select(-all_of(iaov))
+p_fmiss_df <- p_fmiss_df %>%
+  select(-all_of(iaov))
+p_pred_df <- p_pred_df %>%
+  select(-all_of(iaov))
+
+# Update group index vectors and names
+cat_names <- setdiff(cat_names, c(ics, simvars))
+cont_names <- setdiff(cont_names, iaov)
+
+target_ind <- which(colnames(prune_df) == "Conservation.status")
+cat_inds <- which(colnames(prune_df) %in% cat_names)
+cont_inds <- which(colnames(prune_df) %in% cont_names)
+```
+
+```{r FAMD_after}
+# Rerun FAMD after features selection
+prune_famd <- FAMD(prune_df, graph = FALSE)
+
+# Extract percentages of variance for first two dimensions
+ad1p <- prune_famd$eig[1, 2]
+ad2p <- prune_famd$eig[2, 2]
+```
+
+\newpage
+
+After feature removal, we again conduct FAMD to assess the difference. We can see that dimensions 1 and 2 now explain `r round(ad1p, 1)`% and `r round(ad2p, 1)`% of the dataset variance, respectively.
+
+\
+
+```{r FAMD_plot_after}
+# Plot individual points
+fviz_mfa_ind(prune_famd,
+             geom = "point",
+             habillage = "Conservation.status",
+             addEllipses = TRUE,
+             ellipse.level = 0.5,
+             repel = TRUE)
+```
+
+\newpage
+
+In preparation for model fitting, we now create some functions and variables to assist in balancing and discretizing our data. As our target feature, __Conservation.status__ is fairly imbalanced, we will first create a balancing function that oversamples each minority class using the SMOTE algorithm. We will then examine our continuous features and define the number of bins to use for discretization. Below we can see the distribution of each of our remaining continuous features, and the membership of each point once binning is carried out. We chose to create sample bins by quantile to best represent the distribution of the data.
+
+```{r class_balancing}
+# Function to balance Conservation.status via SMOTE
+BB <- function(x) {
+  ## x = data frame to balance containing the Conservation.status feature
+  
+  # Separate Conservation.status levels
+  g <- x %>% group_by(Conservation.status)
+  n <- g %>% group_keys()
+  y <- g %>% group_split()
+  names(y) <- unlist(n)
+  
+  xl <- levels(x$Conservation.status)
+  
+  maj_ind <- which.max(lapply(y, nrow))
+  maj <- y[[maj_ind]]
+  mins <- y[-maj_ind]
+  
+  # Balance each minority class individually
+  findat <- list()
+  
+  for (i in 1:length(mins)) {
+    cd <- rbind(maj, mins[[i]])
+    cd <- droplevels(cd)
+    
+    n <- round(((nrow(maj)/2)-nrow(mins[[i]]))/nrow(mins[[i]]))
+    
+    sd <- smote(Conservation.status ~ ., cd, perc.over = n) %>%
+      filter(Conservation.status != names(y)[maj_ind])
+    findat[[i]] <- sd
+  }
+  
+  # Combine balanced minority classes and retained majority class
+  findat <- bind_rows(findat, maj)
+  findat$Conservation.status <- factor(findat$Conservation.status, levels = xl)
+  
+  return(findat)
+}
+```
+
+```{r to_factor}
+# Convert categorical features to factors
+prune_df <- prune_df %>%
+  mutate(across(all_of(c(cat_names, target_name)), as.factor))
+
+p_in_df <- p_in_df %>%
+  mutate(across(all_of(c(cat_names, target_name)), as.factor))
+p_remiss_df <- p_remiss_df %>%
+  mutate(across(all_of(c(cat_names, target_name)), as.factor))
+p_fmiss_df <- p_fmiss_df %>%
+  mutate(across(all_of(c(cat_names, target_name)), as.factor))
+
+pl <- lapply(prune_df[, -cont_inds], levels)
+cpred <- p_pred_df[, -cont_inds]
+
+for (i in 1:length(pl)) {
+  cpred[, i] <- factor(cpred[, i], levels = pl[[i]])
+}
+
+p_pred_df[, -cont_inds] <- cpred
+```
+
+```{r folds}
+# Shuffle data and get fold membership for records in each non-prediction dataset
+set.seed(6886)
+bat_df <- prune_df[sample(nrow(prune_df)),]
+bat_folds <- cut(seq(1, nrow(bat_df)), breaks = 10, labels = FALSE)
+
+set.seed(6886)
+nooutliers_df <- p_in_df[sample(nrow(p_in_df)),]
+nooutliers_folds <- cut(seq(1, nrow(nooutliers_df)), breaks = 10, labels = FALSE)
+
+set.seed(6886)
+remiss_df <- p_remiss_df[sample(nrow(p_remiss_df)),]
+remiss_folds <- cut(seq(1, nrow(remiss_df)), breaks = 10, labels = FALSE)
+
+set.seed(6886)
+fakemiss_df <- p_fmiss_df[sample(nrow(p_fmiss_df)),]
+fakemiss_folds <- cut(seq(1, nrow(fakemiss_df)), breaks = 10, labels = FALSE)
+
+dd_df <- p_pred_df
+```
+
+```{r define_bins, fig.dim = c(6, 8)}
+# Define bin numbers for continuous variables
+crn = 3
+nrn = 3
+bmn = 4
+
+# Test bin numbers
+cr_bins <- ntile(bat_df$Current.range, n = crn)
+nr_bins <- ntile(bat_df$Natural.range, n = nrn)
+bm_bins <- ntile(bat_df$Body.mass, n = bmn)
+
+# Visualize sample binning
+par(mfrow = c(3, 2))
+hist(bat_df$Current.range, main = NULL, xlab = "Current.range")
+plot(bat_df$Current.range, col = cr_bins, main = "bins = 3", ylab = "Current.range", xlab = NULL)
+hist(bat_df$Natural.range, main = NULL, xlab = "Natural.range")
+plot(bat_df$Natural.range, col = nr_bins, main = "bins = 3", ylab = "Natural.range", xlab = NULL)
+hist(bat_df$Body.mass, main = NULL, xlab = "Body.mass")
+plot(bat_df$Body.mass, col = bm_bins, main = "bins = 4", ylab = "Body.mass", xlab = NULL)
+```
+
+---
+
+\newpage
+
+# Base Model Construction, Tuning and Evaluation
+
+## Model Construction
+
+We now move on to the construction of k-fold cross-validated base models in preparation for tuning. The parameters we will be tuning for each model are as follows:
+
+  * Naive Bayes: the main parameter we will be tuning is the LaPlace estimator.
+  * Decision Tree: the parameters we will be tuning include the minimum observations required for a node split, the minimum number of observations in a terminal node, and the maximum node depth.
+  * SVM: we will be selecting an appropriate kernel and tuning the regularization parameter C.
+  
+We also want to draw attention to the fact that k-fold cross-validation, complete with separate pre-processing of each selected training or validation set, is conducted entirely within each model function. The function takes in the complete raw dataset, excluding "Data Deficient" records, and creates 10 pairs of training and validation subsets with a 9:1 size ratio. Each subset then undergoes class balancing, missing value imputation, scaling, normalization, and continuous variable discretization as necessary for the base model.
+
+```{r NB_func}
+# Function to predict values with Naive Bayes
+NB_predict <- function(df, folds = NULL, pp_inds = cont_inds, lp = 1.8, balance = FALSE, usekfold = TRUE, test_df = NULL) {
+  ## df = dataframe to subset or use for training
+  ## folds = fold membership for each record
+  ## pp_inds = continuous feature indices for pre-processing
+  ## lp = LaPlace estimator value
+  ## balance = should Conservation.status be balanced with SMOTE?
+  ## usekfold = should k-fold cross-validation be applied?
+  ## test_df = dataframe to predict Conservation.status for
+  
+  # List to save results to
+  NB_results <- list()
+  
+  # Lists to save train/test subsets
+  trains <- list()
+  tests <- list()
+  
+  if (usekfold) { # Determine whether to use k-fold cross-validation or simply make a prediction
+    for (i in 1:10) {
+      # Get subsets for current fold
+      test_inds <- which(folds == i)
+      test_group <- df[test_inds, ]
+      train_group <- df[-test_inds, ]
+      
+      # Balance Conservation.status if requested
+      if (balance) {
+        train_group <- BB(train_group)
+      }
+      
+      # Impute any missing values with median or mode
+      train_group[, pp_inds] <- lapply(train_group[, pp_inds], miss2median)
+      train_group[, -pp_inds] <- lapply(train_group[, -pp_inds], miss2mode)
+      test_group[, pp_inds] <- lapply(test_group[, pp_inds], miss2median)
+      test_group[, -pp_inds] <- lapply(test_group[, -pp_inds], miss2mode)
+  
+      # Scale continuous features
+      train_group[, pp_inds] <- scale(train_group[, pp_inds])
+      test_group[, pp_inds] <- scale(test_group[, pp_inds])
+      
+      # Normalize continuous features
+      train_group[, pp_inds] <- logNorm(train_group[, pp_inds])
+      test_group[, pp_inds] <- logNorm(test_group[, pp_inds])
+      
+      # Discretize continuous features
+      test_group$Current.range <- ntile(test_group$Current.range, n = crn)
+      train_group$Current.range <- ntile(train_group$Current.range, n = crn)
+      
+      test_group$Natural.range <- ntile(test_group$Natural.range, n = nrn)
+      train_group$Natural.range <- ntile(train_group$Natural.range, n = nrn)
+      
+      test_group$Body.mass <- ntile(test_group$Body.mass, n = bmn)
+      train_group$Body.mass <- ntile(train_group$Body.mass, n = bmn)
+      
+      test_group <- test_group %>%
+        mutate(across(everything(), as.factor))
+      train_group <- train_group %>%
+        mutate(across(all_of(cont_names), as.factor))
+      
+      # Remove Conservation.status
+      test_group <- select(test_group, -Conservation.status)
+      
+      # Save pre-processed train/test subsets
+      trains[[i]] <- train_group
+      tests[[i]] <- test_group
+    }
+  } else {
+    train_group <- df
+    test_group <- test_df
+    
+    # Balance Conservation.status if requested
+    if (balance) {
+      train_group <- BB(train_group)
+    }
+    
+    # Impute any missing values with median or mode
+    train_group[, pp_inds] <- lapply(train_group[, pp_inds], miss2median)
+    train_group[, -pp_inds] <- lapply(train_group[, -pp_inds], miss2mode)
+    test_group[, pp_inds] <- lapply(test_group[, pp_inds], miss2median)
+    test_group[, -pp_inds] <- lapply(test_group[, -pp_inds], miss2mode)
+
+    # Scale continuous features
+    train_group[, pp_inds] <- scale(train_group[, pp_inds])
+    test_group[, pp_inds] <- scale(test_group[, pp_inds])
+    
+    # Normalize continuous features
+    train_group[, pp_inds] <- logNorm(train_group[, pp_inds])
+    test_group[, pp_inds] <- logNorm(test_group[, pp_inds])
+    
+    # Discretize continuous features
+    test_group$Current.range <- ntile(test_group$Current.range, n = crn)
+    train_group$Current.range <- ntile(train_group$Current.range, n = crn)
+    
+    test_group$Natural.range <- ntile(test_group$Natural.range, n = nrn)
+    train_group$Natural.range <- ntile(train_group$Natural.range, n = nrn)
+    
+    test_group$Body.mass <- ntile(test_group$Body.mass, n = bmn)
+    train_group$Body.mass <- ntile(train_group$Body.mass, n = bmn)
+    
+    test_group <- test_group %>%
+      mutate(across(everything(), as.factor))
+    train_group <- train_group %>%
+      mutate(across(all_of(cont_names), as.factor))
+  
+    # Remove Conservation.status
+    test_group <- select(test_group, -Conservation.status)
+    
+    # Save pre-processed train/test sets
+    trains[[1]] <- train_group
+    tests[[1]] <- test_group
+  }
+
+  for (i in 1:length(trains)) {
+    # Train Naive Bayes model to predict Conservation.status
+    nbmodel <- NaiveBayes(Conservation.status ~ ., data = trains[[i]], fL = lp)
+
+    # Make predictions
+    NB_results[[i]] <- unname(suppressWarnings(predict(nbmodel, tests[[i]]))$class)
+  }  
+  return(NB_results)  
+}
+```
+
+```{r DT_func}
+# Function to predict values with a Decision Tree
+DT_predict <- function(df, folds = NULL, pp_inds = cont_inds, ms = 24, mb = 7, md = 30, balance = FALSE, usekfold = TRUE, test_df = NULL) {
+  ## df = dataframe to subset or use for training
+  ## folds = fold membership for each record
+  ## pp_inds = continuous feature indices for pre-processing
+  ## ms = minsplit value
+  ## mb = minbucket value
+  ## md = maxdepth value
+  ## balance = should Conservation.status be balanced with SMOTE?
+  ## usekfold = should k-fold cross-validation be applied?
+  ## test_df = dataframe to predict Conservation.status for
+  
+  # List to save results to
+  DT_results <- list()
+  
+  # Lists to save train/test subsets
+  trains <- list()
+  tests <- list()
+  
+  if (usekfold) { # Determine whether to use k-fold cross-validation or simply make a prediction
+    for (i in 1:10) {
+      # Get subsets for current fold
+      test_inds <- which(folds == i)
+      test_group <- df[test_inds, ]
+      train_group <- df[-test_inds, ]
+      
+      # Balance Conservation.status if requested
+      if (balance) {
+        train_group <- BB(train_group)
+      }
+      
+      # Impute any missing values with median or mode
+      train_group[, pp_inds] <- lapply(train_group[, pp_inds], miss2median)
+      train_group[, -pp_inds] <- lapply(train_group[, -pp_inds], miss2mode)
+      test_group[, pp_inds] <- lapply(test_group[, pp_inds], miss2median)
+      test_group[, -pp_inds] <- lapply(test_group[, -pp_inds], miss2mode)
+  
+      # Scale continuous features
+      train_group[, pp_inds] <- scale(train_group[, pp_inds])
+      test_group[, pp_inds] <- scale(test_group[, pp_inds])
+      
+      # Normalize continuous features
+      train_group[, pp_inds] <- logNorm(train_group[, pp_inds])
+      test_group[, pp_inds] <- logNorm(test_group[, pp_inds])
+      
+      # Remove Conservation.status
+      test_group <- select(test_group, -Conservation.status)
+      
+      # Save pre-processed train/test subsets
+      trains[[i]] <- train_group
+      tests[[i]] <- test_group
+    }
+  } else {
+    train_group <- df
+    test_group <- test_df
+    
+    # Balance Conservation.status if requested
+    if (balance) {
+      train_group <- BB(train_group)
+    }
+    
+    # Impute any missing values with median or mode
+    train_group[, pp_inds] <- lapply(train_group[, pp_inds], miss2median)
+    train_group[, -pp_inds] <- lapply(train_group[, -pp_inds], miss2mode)
+    test_group[, pp_inds] <- lapply(test_group[, pp_inds], miss2median)
+    test_group[, -pp_inds] <- lapply(test_group[, -pp_inds], miss2mode)
+
+    # Scale continuous features
+    train_group[, pp_inds] <- scale(train_group[, pp_inds])
+    test_group[, pp_inds] <- scale(test_group[, pp_inds])
+    
+    # Normalize continuous features
+    train_group[, pp_inds] <- logNorm(train_group[, pp_inds])
+    test_group[, pp_inds] <- logNorm(test_group[, pp_inds])
+    
+    # Remove Conservation.status
+    test_group <- select(test_group, -Conservation.status)
+    
+    # Save pre-processed train/test sets
+    trains[[1]] <- train_group
+    tests[[1]] <- test_group
+  }
+  
+  for (i in 1:length(trains)) {
+    # Create decision tree model
+    set.seed(6886)
+    control <- rpart.control(minsplit = ms, minbucket = mb, maxdepth = md)
+    tree <- rpart(Conservation.status ~ ., data = trains[[i]], method = "class", control = control)
+    
+    # Make predictions
+    DT_results[[i]] <- unname(predict(tree, tests[[i]], type = "class"))
+  }
+  return(DT_results)
+}
+```
+
+```{r SVM_func}
+# Function to predict values with SVM
+SVM_predict <- function(df, folds = NULL, pp_inds = cont_inds, kernel = "rbfdot", cr = .1, balance = TRUE, usekfold = TRUE, test_df = NULL) {
+  ## df = dataframe to subset or use for training
+  ## folds = fold membership for each record
+  ## pp_inds = continuous feature indices for pre-processing
+  ## kernel = kernel to use
+  ## cr = C regularization parameter value
+  ## balance = should Conservation.status be balanced with SMOTE?
+  ## usekfold = should k-fold cross-validation be applied?
+  ## test_df = dataframe to predict Conservation.status for
+  
+  # List to save results to
+  SVM_results <- list()
+  
+  # Lists to save train/test subsets
+  trains <- list()
+  tests <- list()
+  
+  if (usekfold) { # Determine whether to use k-fold cross-validation or simply make a prediction
+    for (i in 1:10) {
+      # Get subsets for current fold
+      test_inds <- which(folds == i)
+      test_group <- df[test_inds, ]
+      train_group <- df[-test_inds, ]
+      
+      # Balance Conservation.status if requested
+      if (balance) {
+        train_group <- BB(train_group)
+      }
+      
+      # Impute any missing values with median or mode
+      train_group[, pp_inds] <- lapply(train_group[, pp_inds], miss2median)
+      train_group[, -pp_inds] <- lapply(train_group[, -pp_inds], miss2mode)
+      test_group[, pp_inds] <- lapply(test_group[, pp_inds], miss2median)
+      test_group[, -pp_inds] <- lapply(test_group[, -pp_inds], miss2mode)
+  
+      # Scale continuous features
+      train_group[, pp_inds] <- scale(train_group[, pp_inds])
+      test_group[, pp_inds] <- scale(test_group[, pp_inds])
+      
+      # Normalize continuous features
+      train_group[, pp_inds] <- logNorm(train_group[, pp_inds])
+      test_group[, pp_inds] <- logNorm(test_group[, pp_inds])
+      
+      # Remove Conservation.status
+      test_group <- select(test_group, -Conservation.status)
+      
+      # Save pre-processed train/test subsets
+      trains[[i]] <- train_group
+      tests[[i]] <- test_group
+    }
+  } else {
+    train_group <- df
+    test_group <- test_df
+    
+    # Balance Conservation.status if requested
+    if (balance) {
+      train_group <- BB(train_group)
+    }
+    
+    # Impute any missing values with median or mode
+    train_group[, pp_inds] <- lapply(train_group[, pp_inds], miss2median)
+    train_group[, -pp_inds] <- lapply(train_group[, -pp_inds], miss2mode)
+    test_group[, pp_inds] <- lapply(test_group[, pp_inds], miss2median)
+    test_group[, -pp_inds] <- lapply(test_group[, -pp_inds], miss2mode)
+
+    # Scale continuous features
+    train_group[, pp_inds] <- scale(train_group[, pp_inds])
+    test_group[, pp_inds] <- scale(test_group[, pp_inds])
+    
+    # Normalize continuous features
+    train_group[, pp_inds] <- logNorm(train_group[, pp_inds])
+    test_group[, pp_inds] <- logNorm(test_group[, pp_inds])
+    
+    # Remove Conservation.status
+    test_group <- select(test_group, -Conservation.status)
+    
+    # Save pre-processed train/test sets
+    trains[[1]] <- train_group
+    tests[[1]] <- test_group
+  }
+  
+  for (i in 1:length(trains)) {
+    # Create SVM classifier
+    set.seed(6886)
+    classifier_rbf <- ksvm(Conservation.status ~ ., data = trains[[i]], kernel = kernel, C = cr)
+    
+    # Make predictions
+    SVM_results[[i]] <- predict(classifier_rbf, tests[[i]])
+  }
+  return(SVM_results)  
+}
+```
+
+## Model Tuning & Performance Improvement
+
+Also in preparation for model tuning, we will now set up our functions for performance evaluation. The main metric by which we will be assessing each model is the F1 score. The F1 score incorporates both precision and recall and is especially pertinent for a multiclass classification problem with inherently imbalanced class levels. Due to the multiple levels possessed by our target variable, __Conservation.status__, we will combine the F1 scores for each class into an overall __F1.Sum__ statistic. This will take into account individual class prediction failure due to imbalanced data or an overfitted model and will be used in conjunction with accuracy to determine ideal model hyperparameter values.
+
+```{r validation_funcs}
+# Function to get actual Conservation.status values for each fold
+getActuals <- function(df, folds) {
+  ## df = dataframe to use for actual values
+  ## folds = fold membership for each record
+  
+  # List to save actual values
+  actuals <- list()
+  
+  # Get actual values for each fold
+  for (i in 1:10) {
+    fold_inds <- which(folds == i)
+    actuals[i] <- list(as.factor(bat_df$Conservation.status[fold_inds]))
+  }
+  
+  return(actuals)
+}
+
+# Function to compare predicted values to actual values
+evalModel <- function(predictions, actuals) {
+  ## predictions = predicted values
+  ## actuals = actual values
+  
+  # Create a confusion matrix and extract accuracy and class-wise F1 scores
+  cm <- confusionMatrix(predictions, reference = actuals)
+  accuracy <- cm$overall["Accuracy"]
+  F1s <- cm$byClass[, "F1"]
+  
+  return(c(accuracy, F1s))
+}
+
+# Get actual values for all folds of each dataset
+bat_actuals <- getActuals(bat_df, bat_folds)
+nooutliers_actuals <- getActuals(nooutliers_df, nooutliers_folds)
+remiss_actuals <- getActuals(remiss_df, remiss_folds)
+fakemiss_actuals <- getActuals(fakemiss_df, fakemiss_folds)
+```
+
+Now we will carry out model tuning by supplying a range of values for each tunable parameter and assessing the cumulative per-class F1 scores and overall accuracies at each value. Additionally, we will assess the effectiveness of class balancing via SMOTE for each model, as some are more prone to overfitting than others.
+
+```{r test_balance}
+# Predict with SMOTE class balancing
+NB_bal <- NB_predict(bat_df, bat_folds, balance = TRUE)
+DT_bal <- DT_predict(bat_df, bat_folds, balance = TRUE)
+SVM_bal <- SVM_predict(bat_df, bat_folds, balance = TRUE)
+
+# Predict without SMOTE class balancing
+NB_og <- NB_predict(bat_df, bat_folds, balance = FALSE)
+DT_og <- DT_predict(bat_df, bat_folds, balance = FALSE)
+SVM_og <- SVM_predict(bat_df, bat_folds, balance = FALSE)
+
+# Collect results
+bal_list <- list(NB_bal, DT_bal, SVM_bal)
+og_list <- list(NB_og, DT_og, SVM_og)
+
+# Get statistics for each set of results
+bal_eval <- lapply(bal_list, function(z) mapply(function(x, y) evalModel(x, y), z, bat_actuals))
+og_eval <- lapply(og_list, function(z) mapply(function(x, y) evalModel(x, y), z, bat_actuals))
+
+bal_means <- lapply(bal_eval, function(z) apply(z, 1, function(x) mean(x, na.rm = TRUE)))
+og_means <- lapply(og_eval, function(z) apply(z, 1, function(x) mean(x, na.rm = TRUE)))
+
+bal_fsum <- lapply(bal_means, function(z) sum(z[-1], na.rm = TRUE))
+og_fsum <- lapply(og_means, function(z) sum(z[-1], na.rm = TRUE))
+
+# Collect statistics for reporting
+bal_res <- data.frame(Model = c("Naive Bayes", "Decision Tree", "SVM"),
+                      Balanced_F1.Sum = unlist(bal_fsum),
+                      Unbalanced_F1.Sum = unlist(og_fsum))
+kable(bal_res, align = "l")
+```
+
+After assessing the effect of SMOTE class balancing on each model, the balancing conducted is as follows:
+
+ * Naive Bayes: unbalanced
+ * Decision Tree: unbalanced
+ * SVM: balanced
+ 
+After Naive Bayes tuning, the ideal LaPlace estimator value is determined to be 1.8.
+
+```{r NB_tuning, fig.dim = c(6, 2)}
+# NB - LaPlace Estimator = 1.8
+
+# Define range of values for the LaPlace Estimator
+lp_ops <- c(seq(0, 2, by = 0.1))
+lp_acc <- c()
+lp_fsum <- c()
+
+# Test each value and save results
+for (i in 1:length(lp_ops)) {
+  NB_res <- NB_predict(bat_df, bat_folds, lp = lp_ops[i])
+  NB_eval <- mapply(function(x, y) evalModel(x, y), NB_res, bat_actuals)
+  NB_means <- apply(NB_eval, 1, function(x) mean(x, na.rm = TRUE))
+  lp_acc[i] <- NB_means[1]
+  lp_fsum[i] <- sum(NB_means[-1], na.rm = TRUE)
+}
+
+# Collect stats
+lp_stats <- data.frame(LaPlace.Estimator = lp_ops,
+                       F1.Sum = lp_fsum,
+                       Accuracy = lp_acc)
+
+# Plot performances
+lpf <- ggplot(data = lp_stats, aes(x = LaPlace.Estimator, y = F1.Sum)) +
+          geom_line() +
+          geom_point()
+lpa <- ggplot(data = lp_stats, aes(x = LaPlace.Estimator, y = Accuracy)) +
+          geom_line() +
+          geom_point()
+
+grid.arrange(lpf, lpa, nrow = 1, ncol = 2)
+```
+
+After tuning the Decision Tree model, the final model is as follows:
+
+ * Minimum Observations for Node Split: 24
+ * Minimum Observations in Terminal Node: 7
+ * Maximum Node Depth: 30
+
+```{r DT_tuning}
+# DT - Minsplit = 24
+
+# Define range of values for the minsplit value
+ms_ops <- c(seq(10, 30, by = 1))
+ms_acc <- c()
+ms_fsum <- c()
+
+# Test each value and save results
+for (i in 1:length(ms_ops)) {
+  DT_res <- DT_predict(bat_df, bat_folds, ms = ms_ops[i], mb = 7, md = 30)
+  DT_eval <- mapply(function(x, y) evalModel(x, y), DT_res, bat_actuals)
+  DT_means <- apply(DT_eval, 1, function(x) mean(x, na.rm = TRUE))
+  ms_acc[i] <- DT_means[1]
+  ms_fsum[i] <- sum(DT_means[-1], na.rm = TRUE)
+}
+
+# Collect stats
+ms_stats <- data.frame(Minsplit = ms_ops,
+                       F1.Sum = ms_fsum,
+                       Accuracy = ms_acc)
+
+# DT - Minbucket = 7
+
+# Define range of values for the minbucket value
+mb_ops <- c(seq(2, 14, by = 1))
+mb_acc <- c()
+mb_fsum <- c()
+
+# Test each value and save results
+for (i in 1:length(mb_ops)) {
+  DT_res <- DT_predict(bat_df, bat_folds, mb = mb_ops[i], ms = 24, md = 30)
+  DT_eval <- mapply(function(x, y) evalModel(x, y), DT_res, bat_actuals)
+  DT_means <- apply(DT_eval, 1, function(x) mean(x, na.rm = TRUE))
+  mb_acc[i] <- DT_means[1]
+  mb_fsum[i] <- sum(DT_means[-1], na.rm = TRUE)
+}
+
+# Collect stats
+mb_stats <- data.frame(Minbucket = mb_ops,
+                       F1.Sum = mb_fsum,
+                       Accuracy = mb_acc)
+
+# DT - Maxdepth = 30
+
+# Define range of values for the maxdepth value
+md_ops <- c(seq(20, 30, by = 1))
+md_acc <- c()
+md_fsum <- c()
+
+# Test each value and save results
+for (i in 1:length(md_ops)) {
+  DT_res <- DT_predict(bat_df, bat_folds, md = md_ops[i], ms = 24, mb = 7)
+  DT_eval <- mapply(function(x, y) evalModel(x, y), DT_res, bat_actuals)
+  DT_means <- apply(DT_eval, 1, function(x) mean(x, na.rm = TRUE))
+  md_acc[i] <- DT_means[1]
+  md_fsum[i] <- sum(DT_means[-1], na.rm = TRUE)
+}
+
+# Collect stats
+md_stats <- data.frame(Max.Depth = md_ops,
+                       F1.Sum = md_fsum,
+                       Accuracy = md_acc)
+```
+
+```{r DT_tuneresults, fig.dim = c(6, 6)}
+# Plot performances
+msf <- ggplot(data = ms_stats, aes(x = Minsplit, y = F1.Sum)) +
+          geom_line() +
+          geom_point()
+msa <- ggplot(data = ms_stats, aes(x = Minsplit, y = Accuracy)) +
+          geom_line() +
+          geom_point()
+mbf <- ggplot(data = mb_stats, aes(x = Minbucket, y = F1.Sum)) +
+          geom_line() +
+          geom_point()
+mba <- ggplot(data = mb_stats, aes(x = Minbucket, y = Accuracy)) +
+          geom_line() +
+          geom_point()
+mdf <- ggplot(data = md_stats, aes(x = Max.Depth, y = F1.Sum)) +
+          geom_line() +
+          geom_point()
+mda <- ggplot(data = md_stats, aes(x = Max.Depth, y = Accuracy)) +
+          geom_line() +
+          geom_point()
+
+grid.arrange(msf, msa, mbf, mba, mdf, mda, nrow = 3, ncol = 2)
+```
+
+After tuning the SVM model, the final parameters are as follows:
+
+ * Kernel: Radial Basis "Gaussian" kernel
+ * C Regularization Parameter: 0.1
+
+```{r SVM_tuning, results = "hide"}
+# SVM - Kernel = rbfdot
+
+# Define range of values for the kernel
+kernel_ops <- c("rbfdot", "polydot", "vanilladot", "tanhdot", "laplacedot", "besseldot", "anovadot")
+kernel_acc <- c()
+kernel_fsum <- c()
+
+# Test each value and save results
+for (i in 1:length(kernel_ops)) {
+  SVM_res <- SVM_predict(bat_df, bat_folds, kernel = kernel_ops[i], cr = 1)
+  SVM_eval <- mapply(function(x, y) evalModel(x, y), SVM_res, bat_actuals)
+  SVM_means <- apply(SVM_eval, 1, function(x) mean(x, na.rm = TRUE))
+  kernel_acc[i] <- SVM_means[1]
+  kernel_fsum[i] <- sum(SVM_means[-1], na.rm = TRUE)
+}
+
+# Collect stats
+kernel_stats <- data.frame(Kernel = kernel_ops,
+                           F1.Sum = kernel_fsum,
+                           Accuracy = kernel_acc)
+
+# SVM - C = 1
+
+# Define range of values for the C regularization value
+cr_ops <- c(1e-5, 1e-4, 0.001, 0.01, 0.1, 1, 10, 100, 1000, 10000, 1e+5)
+cr_acc <- c()
+cr_fsum <- c()
+
+# Test each value and save results
+for (i in 1:length(cr_ops)) {
+  SVM_res <- SVM_predict(bat_df, bat_folds, cr = cr_ops[i], kernel = "rbfdot")
+  SVM_eval <- mapply(function(x, y) evalModel(x, y), SVM_res, bat_actuals)
+  SVM_means <- apply(SVM_eval, 1, function(x) mean(x, na.rm = TRUE))
+  cr_acc[i] <- SVM_means[1]
+  cr_fsum[i] <- sum(SVM_means[-1], na.rm = TRUE)
+}
+
+# Collect stats
+cr_stats <- data.frame(C.value = cr_ops,
+                       F1.Sum = cr_fsum,
+                       Accuracy = cr_acc)
+```
+
+```{r SVM_tuneresults, fig.dim = c(6, 2)}
+# View performances
+kable(kernel_stats, align = "l")
+
+# Plot performances
+crf <- ggplot(data = cr_stats, aes(x = C.value, y = F1.Sum)) +
+          geom_line() +
+          geom_point() +
+          scale_x_continuous(trans = "log10")
+cra <- ggplot(data = cr_stats, aes(x = C.value, y = Accuracy)) +
+          geom_line() +
+          geom_point() +
+          scale_x_continuous(trans = "log10")
+
+grid.arrange(crf, cra, nrow = 1, ncol = 2)
+```
+
+## Base Model Evaluation
+
+We will now evaluate the performance of each individual base model after tuning. The model with the best performance, as assessed via F1 scores and accuracy, will serve as the tiebreaker for the majority vote heterogeneous ensemble model.
+
+```{r base_eval}
+# Base model results for bat_df
+NB_res <- NB_predict(bat_df, bat_folds)
+DT_res <- DT_predict(bat_df, bat_folds)
+SVM_res <- SVM_predict(bat_df, bat_folds)
+
+# Get statistics for base models
+NB_eval <- mapply(function(x, y) evalModel(x, y), NB_res, bat_actuals)
+DT_eval <- mapply(function(x, y) evalModel(x, y), DT_res, bat_actuals)
+SVM_eval <- mapply(function(x, y) evalModel(x, y), SVM_res, bat_actuals)
+
+NB_means <- apply(NB_eval, 1, function(x) mean(x, na.rm = TRUE))
+DT_means <- apply(DT_eval, 1, function(x) mean(x, na.rm = TRUE))
+SVM_means <- apply(SVM_eval, 1, function(x) mean(x, na.rm = TRUE))
+
+NB_fsum <- sum(NB_means[-1], na.rm = TRUE)
+DT_fsum <- sum(DT_means[-1], na.rm = TRUE)
+SVM_fsum <- sum(SVM_means[-1], na.rm = TRUE)
+
+NB_acc <- NB_means[[1]]
+DT_acc <- DT_means[[1]]
+SVM_acc <- SVM_means[[1]]
+
+# Collect statistics for reporting
+base_res <- data.frame(Model = c("Naive Bayes", "Decision Tree", "SVM"),
+                       F1.Sum = c(NB_fsum, DT_fsum, SVM_fsum),
+                       Accuracy = c(NB_acc, DT_acc, SVM_acc))
+kable(base_res, align = "l")
+```
+
+We can see above that the Naive Bayes model possesses the highest summed class-wise F1 scores, with only a small drop in accuracy when compared to the Decision Tree model. As the F1 score encompasses both precision and recall, we are prioritizing it over the simple accuracy metric. Additionally, we notice the large gap between the F1.Sum score of the Naive Bayes model and the other two models. This indicates that the Decision Tree and SVM models were unable to identify one or more minority classes from the __Conservation.status__ target variable. We preemptively addressed this issue with SMOTE class balancing as described above, but it is hypothesized that the limited number of examples available for the minority classes simply do not provide enough information to appreciably improve results with balancing.
+
+---
+
+\newpage
+
+# Ensemble Model Construction and Evaluation
+
+## Random Forest and Heterogeneous Ensemble Models
+
+Now that our ideal model parameters have been determined and model performance has been assessed, we will use our base models to create two ensemble models. A bagging Decision Tree model will be implemented via the Random Forest classifier, and our three base models will also be combined into a heterogeneous ensemble model. For this model, the target class, __Conservation.status__, will be predicted by each base model and a majority vote will be used to determine the consensus prediction for each data point. In the event of a three-way tie, the Naive Bayes prediction will become the consensus, as that model was found to have the best performance after tuning.
+
+```{r RF_func}
+# Function to predict values with a Random Forest
+RF_predict <- function(df, folds = NULL, pp_inds = cont_inds, balance = FALSE, usekfold = TRUE, test_df = NULL) {
+  ## df = dataframe to subset or use for training
+  ## folds = fold membership for each record
+  ## pp_inds = continuous feature indices for pre-processing
+  ## balance = should Conservation.status be balanced with SMOTE?
+  ## usekfold = should k-fold cross-validation be applied?
+  ## test_df = dataframe to predict Conservation.status for
+  
+  # List to save results to
+  RF_results <- list()
+
+  # Lists to save train/test subsets
+  trains <- list()
+  tests <- list()
+  
+  if (usekfold) { # Determine whether to use k-fold cross-validation or simply make a prediction
+    for (i in 1:10) {
+      # Get subsets for current fold
+      test_inds <- which(folds == i)
+      test_group <- df[test_inds, ]
+      train_group <- df[-test_inds, ]
+      
+      # Balance Conservation.status if requested
+      if (balance) {
+        train_group <- BB(train_group)
+      }
+        
+      # Impute any missing values with median or mode
+      train_group[, pp_inds] <- lapply(train_group[, pp_inds], miss2median)
+      train_group[, -pp_inds] <- lapply(train_group[, -pp_inds], miss2mode)
+      test_group[, pp_inds] <- lapply(test_group[, pp_inds], miss2median)
+      test_group[, -pp_inds] <- lapply(test_group[, -pp_inds], miss2mode)
+  
+      # Scale continuous features
+      train_group[, pp_inds] <- scale(train_group[, pp_inds])
+      test_group[, pp_inds] <- scale(test_group[, pp_inds])
+      
+      # Normalize continuous features
+      train_group[, pp_inds] <- logNorm(train_group[, pp_inds])
+      test_group[, pp_inds] <- logNorm(test_group[, pp_inds])
+      
+      # Remove Conservation.status
+      test_group <- select(test_group, -Conservation.status)
+      
+      # Save pre-processed train/test subsets
+      trains[[i]] <- train_group
+      tests[[i]] <- test_group
+    }
+  } else {
+    train_group <- df
+    test_group <- test_df
+    
+    # Balance Conservation.status if requested
+    if (balance) {
+      train_group <- BB(train_group)
+    }
+      
+    # Impute any missing values with median or mode
+    train_group[, pp_inds] <- lapply(train_group[, pp_inds], miss2median)
+    train_group[, -pp_inds] <- lapply(train_group[, -pp_inds], miss2mode)
+    test_group[, pp_inds] <- lapply(test_group[, pp_inds], miss2median)
+    test_group[, -pp_inds] <- lapply(test_group[, -pp_inds], miss2mode)
+
+    # Scale continuous features
+    train_group[, pp_inds] <- scale(train_group[, pp_inds])
+    test_group[, pp_inds] <- scale(test_group[, pp_inds])
+    
+    # Normalize continuous features
+    train_group[, pp_inds] <- logNorm(train_group[, pp_inds])
+    test_group[, pp_inds] <- logNorm(test_group[, pp_inds])
+    
+    # Remove Conservation.status
+    test_group <- select(test_group, -Conservation.status)
+    
+    # Save pre-processed train/test sets
+    trains[[1]] <- train_group
+    tests[[1]] <- test_group
+  }
+  
+  for (i in 1:length(trains)) {
+    # Create random forest model
+    set.seed(6886)
+    rf <- randomForest(Conservation.status ~ ., data = trains[[i]], proximity = TRUE)
+    
+    # Make predictions
+    RF_results[[i]] <- unname(predict(rf, tests[[i]], type = "class"))
+  }
+  return(RF_results)  
+}
+```
+
+```{r ensemble_func}
+# Function for majority vote heterogeneous ensemble model
+ndsEnsemble <- function(df, folds = NULL, tdf = NULL, kf = TRUE) {
+  ## df = dataframe to subset or use for training
+  ## folds = fold membership for each record
+  ## tdf = dataframe to predict Conservation.status for
+  ## kf = logical: should k-fold cross-validation be applied?
+  
+  # List to save results to
+  EN_results <- list()
+  
+  # Get results for each base model
+  NB_res <- NB_predict(df, folds, test_df = tdf, usekfold = kf)
+  DT_res <- DT_predict(df, folds, test_df = tdf, usekfold = kf)
+  SVM_res <- SVM_predict(df, folds, test_df = tdf, usekfold = kf)
+  
+  # Save Conservation.status factor levels
+  xl <- levels(df$Conservation.status)
+  
+  # Get consensus results
+  for (h in 1:length(NB_res)) {
+    c_results <- c()
+    for (j in 1:length(NB_res[[h]])) {
+      a <- NB_res[[h]][j]
+      b <- DT_res[[h]][j]
+      c <- SVM_res[[h]][j]
+      v <- c(a, b, c)
+      
+      if (length(unique(v)) == length(v)) {
+        # Select Naive Bayes prediction in the case of a tie
+        c_results[j] <- as.character(a)
+      } else {
+        # Select majority voted prediction
+        c_results[j] <- as.character(smode(v)) 
+      }
+    }
+    EN_results[[h]] <- factor(c_results, levels = xl)
+  }
+  
+  return(EN_results)
+} 
+```
+
+## Ensemble Model Evaluation
+
+We will now assess our two ensemble models: the heterogeneous ensemble and our Random Forest implementation. These models will again be assessed via F1 score summation and accuracy, and we will also compare them to all three of our base models.
+
+```{r ensemble_eval}
+# Ensemble model results for bat_df
+RF_res <- RF_predict(bat_df, bat_folds)
+EN_res <- ndsEnsemble(bat_df, bat_folds)
+
+# Get statistics for ensemble models
+RF_eval <- mapply(function(x, y) evalModel(x, y), RF_res, bat_actuals)
+EN_eval <- mapply(function(x, y) evalModel(x, y), EN_res, bat_actuals)
+
+RF_means <- apply(RF_eval, 1, function(x) mean(x, na.rm = TRUE))
+EN_means <- apply(EN_eval, 1, function(x) mean(x, na.rm = TRUE))
+
+RF_fsum <- sum(RF_means[-1], na.rm = TRUE)
+EN_fsum <- sum(EN_means[-1], na.rm = TRUE)
+
+RF_acc <- RF_means[[1]]
+EN_acc <- EN_means[[1]]
+
+# Collect statistics for reporting
+model_res <- data.frame(Model = c("Naive Bayes", "Decision Tree", "SVM", "Random Forest", "Heterogeneous Ensemble"),
+                        F1.Sum = c(NB_fsum, DT_fsum, SVM_fsum, RF_fsum, EN_fsum),
+                        Accuracy = c(NB_acc, DT_acc, SVM_acc, RF_acc, EN_acc))
+kable(model_res, align = "l")
+```
+
+It can be seen above that the Naive Bayes model continues to generate the best F1.Sum score, though it is closely followed by the our heterogeneous ensemble model. Additionally, the heterogeneous ensemble displays a slight improvement in accuracy over the Naive Bayes model. The Random Forest model also performs quite well, with a slight drop in F1.Sum and a slight increase in accuracy.
+
+---
+
+\newpage
+
+# Data Assessment and Prediction
+
+## Effects of Preprocessing
+
+As a last step before predicting __Conservation.status__ values for the "Data Deficient" records, we will compare the effects of outlier removal and missing value imputation in the context of our heterogeneous ensemble model. The dataset pairs we will be comparing are as follows:
+
+ 1. Outliers
+    * Outliers are left in
+    * Outliers are removed
+ 2. Missing Values
+    * Missing values are removed
+    * Missing values are imputed with median or mode
+
+
+Below we see the F1.Sum and accuracy metrics for each dataset.
+
+```{r test_sets}
+# Ensemble model results for each dataset
+bat_res <- ndsEnsemble(bat_df, bat_folds)
+nooutliers_res <- ndsEnsemble(nooutliers_df, nooutliers_folds)
+remiss_res <- ndsEnsemble(remiss_df, remiss_folds)
+fakemiss_res <- ndsEnsemble(fakemiss_df, fakemiss_folds)
+
+# Get statistics
+bat_eval <- mapply(function(x, y) evalModel(x, y), bat_res, bat_actuals)
+nooutliers_eval <- mapply(function(x, y) evalModel(x, y), nooutliers_res, nooutliers_actuals)
+remiss_eval <- mapply(function(x, y) evalModel(x, y), remiss_res, remiss_actuals)
+fakemiss_eval <- mapply(function(x, y) evalModel(x, y), fakemiss_res, fakemiss_actuals)
+
+bat_means <- apply(bat_eval, 1, function(x) mean(x, na.rm = TRUE))
+nooutliers_means <- apply(nooutliers_eval, 1, function(x) mean(x, na.rm = TRUE))
+remiss_means <- apply(remiss_eval, 1, function(x) mean(x, na.rm = TRUE))
+fakemiss_means <- apply(fakemiss_eval, 1, function(x) mean(x, na.rm = TRUE))
+
+bat_fsum <- sum(bat_means[-1], na.rm = TRUE)
+nooutliers_fsum <- sum(nooutliers_means[-1], na.rm = TRUE)
+remiss_fsum <- sum(remiss_means[-1], na.rm = TRUE)
+fakemiss_fsum <- sum(fakemiss_means[-1], na.rm = TRUE)
+
+bat_acc <- bat_means[[1]]
+nooutliers_acc <- nooutliers_means[[1]]
+remiss_acc <- remiss_means[[1]]
+fakemiss_acc <- fakemiss_means[[1]]
+
+# Collect statistics for reporting
+set_res <- data.frame(Dataset = c("Has outliers", "Removed outliers", "Removed NAs", "Imputed NAs"),
+                      F1.Sum = c(bat_fsum, nooutliers_fsum, remiss_fsum, fakemiss_fsum),
+                      Accuracy = c(bat_acc, nooutliers_acc, remiss_acc, fakemiss_acc))
+kable(set_res, align = "l")
+```
+
+We can see here that the ideal outlier handling procedure for this dataset is to keep them in. This is likely due to the imbalance in __Conservation.status__ levels causing minority levels to be detected as outliers. Additionally, we see that the ideal method of missing value handling is imputation with median or mode, according to value type.
+
+\newpage
+
+## Final Predictions
+
+Finally, we use our heterogeneous ensemble model to predict __Conservation.status__ values for those records that originally fell into the "Data Deficient" level. The frequency of each level within the predicted results as well as the level percentages compared to the percentages of those levels originally provided in the dataset can be seen below.
+
+```{r ensemble_predict}
+# Make final predictions for Data Deficient set
+DD_res <- ndsEnsemble(bat_df, tdf = dd_df, kf = FALSE)
+
+# Collect statistics for reporting
+pred_mat <- as.data.frame(table(DD_res))
+colnames(pred_mat) <- c("Conservation.status", "Frequency")
+kable(pred_mat, align = "l")
+pred_mat$Percentage <- pred_mat$Frequency / sum(pred_mat$Frequency)
+pred_mat$Dataset <- "Predicted"
+
+bat_mat <- as.data.frame(table(bat_df$Conservation.status))
+colnames(bat_mat) <- c("Conservation.status", "Frequency")
+bat_mat$Percentage <- bat_mat$Frequency / sum(bat_mat$Frequency)
+bat_mat$Dataset <- "Provided"
+
+comp_mat <- rbind(bat_mat, pred_mat)
+
+comp_plot <- ggplot(data = comp_mat, aes(fill = Dataset, y = Percentage, x = Conservation.status)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  theme(axis.text.x = element_text(hjust = 1, angle = 45, vjust = 1))
+comp_plot
+```
+
+---
+
+\newpage
+
+# Conclusion
+
+Over the course of this project, we analyzed the utility of ecological metadata surrounding bats as predictors for conservation status. We combined two datasets to create novel features indicating parasitemia and assessed their relationship with conservation status. We also tested the effectiveness of various pre-processing techniques such as class balancing on our specific dataset and their utility in individual models. We applied three base models to the data and tuned their hyperparameters before constructing ensembles. Two ensemble models were then created and applied. The performance of each of these models was assessed throughout via k-fold cross-validation and the F1 score and accuracy metrics. Finally, our heterogeneous ensemble was applied to make predictions for a portion of the original data that lacked a definitive conservation status.
+
+These resulting predictions followed the distribution of conservation status values in the original dataset, and our ensemble model assessment indicates a classification accuracy of `r round(EN_acc*100)`%.
+
+As we constructed the models, we also were able to assess the metadata features that contributed the most to conservation status. We learned that a bat species' current range shows the most association with conservation status, indicating that this could be a valuable metric for assessing conservation status in bat species for which less ecological metadata is available.
+
+---
+
+\newpage
+
+# References
+
+Tanalgo, K. C., Oliveira, H. F. M., & Hughes, A. C. (2022a). Mapping global conservation priorities and habitat vulnerabilities for cave-dwelling bats in a changing world. _The Science of the Total Environment, 843_, 156909. [https://doi.org/10.1016/j.scitotenv.2022.156909](https://doi.org/10.1016/j.scitotenv.2022.156909)
+
+Tanalgo, K. C., Tabora, J. A. G., de Oliveira, H. F. M., Haelewaters, D., Beranek, C. T., Otálora-Ardila, A., Bernard, E., Gonçalves, F., Eriksson, A., Donnelly, M., González, J. M., Ramos, H. F., Rivas, A. C., Webala, P. W., Deleva, S., Dalhoumi, R., Maula, J., Lizarro, D., Aguirre, L. F., . . . Hughes, A. C. (2022b). DarkCideS 1.0, a global database for bats in karsts and caves. _Scientific Data, 9_(1), 155. [https://doi.org/10.1038/s41597-022-01234-4](https://doi.org/10.1038/s41597-022-01234-4)
